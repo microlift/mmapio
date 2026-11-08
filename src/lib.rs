@@ -191,7 +191,8 @@ impl MmapOptions {
 
     /// Configures the memory map to be locked using.
     ///
-    /// This option corresponds to the `MAP_LOCKED` flag on Linux, and has no effect on Window and MacOS.
+    /// This option corresponds to the `MAP_LOCKED` flag on Linux. On FreeBSD the mapping is locked
+    /// with `mlock` once created. It has no effect on Windows and macOS.
     ///
     /// Note this requires privileged access.
     pub fn lock(&mut self) -> &mut Self {

@@ -21,17 +21,18 @@ const MAP_STACK: libc::c_int = 0;
 
 #[cfg(any(
 all(target_os = "linux", not(target_arch = "mips")),
-target_os = "freebsd",
 target_os = "android"
 ))]
 const MAP_LOCKED: libc::c_int = libc::MAP_LOCKED;
 
 #[cfg(not(any(
 all(target_os = "linux", not(target_arch = "mips")),
-target_os = "freebsd",
 target_os = "android"
 )))]
 const MAP_LOCKED: libc::c_int = 0;
+
+// FreeBSD has no MAP_LOCKED; mlock(2) after mapping gives the same result.
+const MLOCK_AFTER_MAP: bool = cfg!(target_os = "freebsd");
 
 pub struct MmapInner {
     ptr: *mut libc::c_void,
@@ -52,9 +53,11 @@ impl MmapInner {
         len: usize,
         prot: libc::c_int,
         flags: libc::c_int,
+        locked: bool,
         file: RawFd,
         offset: u64,
     ) -> io::Result<MmapInner> {
+        let flags = if locked { flags | MAP_LOCKED } else { flags };
         let alignment = offset % page_size() as u64;
         let aligned_offset = offset - alignment;
         let aligned_len = len + alignment as usize;
@@ -77,59 +80,62 @@ impl MmapInner {
             );
 
             if ptr == libc::MAP_FAILED {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(MmapInner {
-                    ptr: ptr.offset(alignment as isize),
-                    len: len,
-                })
+                return Err(io::Error::last_os_error());
             }
+            let inner = MmapInner {
+                ptr: ptr.offset(alignment as isize),
+                len: len,
+            };
+            if locked && MLOCK_AFTER_MAP {
+                // Dropping `inner` on failure unmaps it.
+                inner.mlock()?;
+            }
+            Ok(inner)
         }
     }
 
     pub fn map(len: usize, file: &File, offset: u64, locked: bool, private: bool) -> io::Result<MmapInner> {
-        let locked = if locked { MAP_LOCKED } else { 0 };
         let private = if private { libc::MAP_PRIVATE } else { libc::MAP_SHARED };
         MmapInner::new(
             len,
             libc::PROT_READ,
-            locked | private,
+            private,
+            locked,
             file.as_raw_fd(),
             offset,
         )
     }
 
     pub fn map_exec(len: usize, file: &File, offset: u64, locked: bool, private: bool) -> io::Result<MmapInner> {
-        let locked = if locked { MAP_LOCKED } else { 0 };
         let private = if private { libc::MAP_PRIVATE } else { libc::MAP_SHARED };
         MmapInner::new(
             len,
             libc::PROT_READ | libc::PROT_EXEC,
-            locked | private,
+            private,
+            locked,
             file.as_raw_fd(),
             offset,
         )
     }
 
     pub fn map_mut(len: usize, file: &File, offset: u64, locked: bool, private: bool) -> io::Result<MmapInner> {
-        let locked = if locked { MAP_LOCKED } else { 0 };
         let private = if private { libc::MAP_PRIVATE } else { libc::MAP_SHARED };
         MmapInner::new(
             len,
             libc::PROT_READ | libc::PROT_WRITE,
-            locked | private,
+            private,
+            locked,
             file.as_raw_fd(),
             offset,
         )
     }
 
     pub fn map_copy(len: usize, file: &File, offset: u64, locked: bool) -> io::Result<MmapInner> {
-        let locked = if locked { MAP_LOCKED } else { 0 };
-
         MmapInner::new(
             len,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | locked,
+            libc::MAP_PRIVATE,
+            locked,
             file.as_raw_fd(),
             offset,
         )
@@ -138,12 +144,12 @@ impl MmapInner {
     /// Open an anonymous memory map.
     pub fn map_anon(len: usize, stack: bool, locked: bool, private: bool) -> io::Result<MmapInner> {
         let stack = if stack { MAP_STACK } else { 0 };
-        let locked = if locked { MAP_LOCKED } else { 0 };
         let private = if private { libc::MAP_PRIVATE } else { libc::MAP_SHARED };
         MmapInner::new(
             len,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_ANON | stack | locked | private,
+            libc::MAP_ANON | stack | private,
+            locked,
             -1,
             0,
         )
